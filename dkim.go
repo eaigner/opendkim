@@ -87,23 +87,23 @@ const (
 )
 
 const (
-	LibflagsNONE          Option = 0x0000
-	LibflagsTMPFILES      Option = 0x0001
-	LibflagsKEEPFILES     Option = 0x0002
-	LibflagsSIGNLEN       Option = 0x0004
-	LibflagsCACHE         Option = 0x0008
-	LibflagsZTAGS         Option = 0x0010
-	LibflagsDELAYSIGPROC  Option = 0x0020
-	LibflagsEOHCHECK      Option = 0x0040
-	LibflagsACCEPTV05     Option = 0x0080
-	LibflagsFIXCRLF       Option = 0x0100
-	LibflagsACCEPTDK      Option = 0x0200
-	LibflagsBADSIGHANDLES Option = 0x0400
-	LibflagsVERIFYONE     Option = 0x0800
-	LibflagsSTRICTHDRS    Option = 0x1000
-	LibflagsREPORTBADADSP Option = 0x2000
-	LibflagsDROPSIGNER    Option = 0x4000
-	LibflagsSTRICTRESIGN  Option = 0x8000
+	LibflagsNONE          = 0x0000
+	LibflagsTMPFILES      = 0x0001
+	LibflagsKEEPFILES     = 0x0002
+	LibflagsSIGNLEN       = 0x0004
+	LibflagsCACHE         = 0x0008
+	LibflagsZTAGS         = 0x0010
+	LibflagsDELAYSIGPROC  = 0x0020
+	LibflagsEOHCHECK      = 0x0040
+	LibflagsACCEPTV05     = 0x0080
+	LibflagsFIXCRLF       = 0x0100
+	LibflagsACCEPTDK      = 0x0200
+	LibflagsBADSIGHANDLES = 0x0400
+	LibflagsVERIFYONE     = 0x0800
+	LibflagsSTRICTHDRS    = 0x1000
+	LibflagsREPORTBADADSP = 0x2000
+	LibflagsDROPSIGNER    = 0x4000
+	LibflagsSTRICTRESIGN  = 0x8000
 )
 
 const (
