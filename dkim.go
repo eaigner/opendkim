@@ -3,8 +3,8 @@
 package opendkim
 
 /*
-#cgo LDFLAGS: -L/opt/local/lib -lopendkim
-#cgo CFLAGS: -g -O2 -I/opt/local/include/opendkim/
+#cgo LDFLAGS: -L/opt/local/lib -L/usr/lib -lopendkim
+#cgo CFLAGS: -g -O2 -I/opt/local/include/opendkim/ -I/usr/include/opendkim/
 
 #include <stdio.h>
 #include <stdlib.h>
