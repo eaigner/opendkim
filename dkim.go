@@ -20,6 +20,8 @@ import "C"
 import (
 	"bytes"
 	"fmt"
+	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -125,6 +127,7 @@ func SetOption(opt Option, data []byte) {
 type Dkim struct {
 	dkim *C.DKIM
 	stat C.DKIM_STAT
+	mtx  sync.Mutex
 }
 
 // NewSigner creates a new DKIM handle for message signing.
@@ -147,6 +150,9 @@ func NewSigner(secret, selector, domain string, hdrCanon, bodyCanon Canon, algo 
 	if signer.dkim == nil {
 		panic("could not create DKIM handle")
 	}
+	runtime.SetFinalizer(signer, func(s *Dkim) {
+		s.Destroy()
+	})
 	return signer
 }
 
@@ -212,7 +218,7 @@ func (d *Dkim) GetSigHdr() (string, error) {
 	var buf = make([]byte, 1024)
 	stat = C.dkim_getsighdr(d.dkim, (*C.u_char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), C.size_t(0))
 	if Status(stat) != StatusOK {
-		return "", fmt.Errorf("error computing signature header (%s)", (&dkimError{stat}).Error())
+		return "", fmt.Errorf("error computing signature header (%s)", getErr(stat))
 	}
 	i := bytes.Index(buf, []byte{0x0})
 	if i >= 0 {
@@ -221,8 +227,24 @@ func (d *Dkim) GetSigHdr() (string, error) {
 	return string(buf), nil
 }
 
+// GetError gets the last error for the dkim handle
 func (d *Dkim) GetError() string {
 	return C.GoString(C.dkim_geterror(d.dkim))
+}
+
+// Destroy destroys the dkim handle
+func (d *Dkim) Destroy() error {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	if d.dkim != nil {
+		var stat C.DKIM_STAT
+		stat = C.dkim_free(d.dkim)
+		if Status(stat) != StatusOK {
+			return fmt.Errorf("could not destroy DKIM handle (%s)", getErr(stat))
+		}
+		d.dkim = nil
+	}
+	return nil
 }
 
 func getErr(s C.DKIM_STAT) string {
