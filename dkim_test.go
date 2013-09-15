@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-	// "unsafe"
 )
 
 var msgHdr = map[string]string{
@@ -82,7 +81,7 @@ func process(hdr map[string]string, body string, d *Dkim, t *testing.T) {
 	}
 }
 
-func logMsg(hdr map[string]string, body string, t *testing.T) {
+func createMsg(hdr map[string]string, body string) []byte {
 	var buf bytes.Buffer
 	for k, v := range hdr {
 		buf.WriteString(k + `: ` + v + "\r\n")
@@ -90,7 +89,7 @@ func logMsg(hdr map[string]string, body string, t *testing.T) {
 	buf.WriteString("\r\n")
 	buf.WriteString(body)
 
-	t.Log(buf.String())
+	return buf.Bytes()
 }
 
 func TestSignAndVerify(t *testing.T) {
@@ -133,7 +132,7 @@ func TestSignAndVerify(t *testing.T) {
 	}
 	hdr["DKIM-Signature"] = h
 
-	logMsg(hdr, msgBody, t)
+	t.Log(string(createMsg(hdr, msgBody)))
 
 	d2, err := lib.NewVerifier()
 	if err != nil {
@@ -170,5 +169,37 @@ func TestSignAndVerify(t *testing.T) {
 	}
 	if x := (flags & SigflagPASSED); x == 0 {
 		t.Fatal(x)
+	}
+}
+
+func TestSignHelper(t *testing.T) {
+	lib := Init()
+	defer lib.Close()
+
+	d, err := lib.NewSigner(
+		testKey,
+		selector,
+		domain,
+		CanonRELAXED,
+		CanonRELAXED,
+		SignRSASHA1,
+		-1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == nil {
+		t.Fatal()
+	}
+
+	msg := createMsg(msgHdr, msgBody)
+
+	out, err := d.Sign(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bytes.Index(out, []byte(`DKIM-Signature: v=1`)) < 0 {
+		t.Fatal("signature header not found")
 	}
 }

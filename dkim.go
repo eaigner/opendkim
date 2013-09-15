@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"net/mail"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -208,6 +210,52 @@ func (lib *Lib) NewVerifier() (*Dkim, error) {
 		s.Destroy()
 	})
 	return vrfy, nil
+}
+
+// Sign is a helper method for signing a block of message data.
+// The message data includes header and body.
+func (d *Dkim) Sign(buf []byte) ([]byte, error) {
+	msg, err := mail.ReadMessage(bytes.NewBuffer(buf))
+	if err != nil {
+		return buf, err
+	}
+	var out bytes.Buffer
+	for k, vv := range msg.Header {
+		for _, v := range vv {
+			hdr := k + `: ` + v
+			err := d.Header(hdr)
+			if err != nil {
+				return buf, err
+			}
+			out.WriteString(hdr + "\r\n")
+		}
+	}
+
+	err = d.Eoh()
+	if err != nil {
+		return buf, err
+	}
+
+	var body bytes.Buffer
+	io.Copy(&body, msg.Body)
+
+	err = d.Body(body.Bytes())
+	if err != nil {
+		return buf, err
+	}
+	err = d.Eom(nil)
+	if err != nil {
+		return buf, err
+	}
+	sigHdr, err := d.GetSigHdr()
+	if err != nil {
+		return buf, err
+	}
+
+	out.WriteString(`DKIM-Signature: ` + sigHdr + "\r\n\r\n")
+	io.Copy(&out, &body)
+
+	return out.Bytes(), nil
 }
 
 // Header processes a single header line.
