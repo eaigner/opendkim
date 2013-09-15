@@ -19,6 +19,7 @@ import "C"
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -26,11 +27,11 @@ import (
 )
 
 type (
-	Canon  int
-	Sign   int
-	Status int
-	Op     int
-	Option int
+	Canon   int
+	Sign    int
+	Op      int
+	Option  int
+	Sigflag uint
 )
 
 const (
@@ -47,24 +48,24 @@ const (
 )
 
 const (
-	StatusOK            Status = 0  // function completed successfully
-	StatusBADSIG        Status = 1  // signature available but failed
-	StatusNOSIG         Status = 2  // no signature available
-	StatusNOKEY         Status = 3  // public key not found
-	StatusCANTVRFY      Status = 4  // can't get domain key to verify
-	StatusSYNTAX        Status = 5  // message is not valid syntax
-	StatusNORESOURCE    Status = 6  // resource unavailable
-	StatusINTERNAL      Status = 7  // internal error
-	StatusREVOKED       Status = 8  // key found, but revoked
-	StatusINVALID       Status = 9  // invalid function parameter
-	StatusNOTIMPLEMENT  Status = 10 // function not implemented
-	StatusKEYFAIL       Status = 11 // key retrieval failed
-	StatusCBREJECT      Status = 12 // callback requested reject
-	StatusCBINVALID     Status = 13 // callback gave invalid result
-	StatusCBTRYAGAIN    Status = 14 // callback says try again later
-	StatusCBERROR       Status = 15 // callback error
-	StatusMULTIDNSREPLY Status = 16 // multiple DNS replies
-	StatusSIGGEN        Status = 17 // signature generation failed
+	StatusOK            = 0  // function completed successfully
+	StatusBADSIG        = 1  // signature available but failed
+	StatusNOSIG         = 2  // no signature available
+	StatusNOKEY         = 3  // public key not found
+	StatusCANTVRFY      = 4  // can't get domain key to verify
+	StatusSYNTAX        = 5  // message is not valid syntax
+	StatusNORESOURCE    = 6  // resource unavailable
+	StatusINTERNAL      = 7  // internal error
+	StatusREVOKED       = 8  // key found, but revoked
+	StatusINVALID       = 9  // invalid function parameter
+	StatusNOTIMPLEMENT  = 10 // function not implemented
+	StatusKEYFAIL       = 11 // key retrieval failed
+	StatusCBREJECT      = 12 // callback requested reject
+	StatusCBINVALID     = 13 // callback gave invalid result
+	StatusCBTRYAGAIN    = 14 // callback says try again later
+	StatusCBERROR       = 15 // callback error
+	StatusMULTIDNSREPLY = 16 // multiple DNS replies
+	StatusSIGGEN        = 17 // signature generation failed
 )
 
 const (
@@ -107,35 +108,73 @@ const (
 )
 
 const (
+	SigflagIGNORE      = 0x01
+	SigflagPROCESSED   = 0x02
+	SigflagPASSED      = 0x04
+	SigflagTESTKEY     = 0x08
+	SigflagNOSUBDOMAIN = 0x10
+	SigflagKEYLOADED   = 0x20
+)
+
+const (
+	QueryUNKNOWN = (-1) // unknown method
+	QueryDNS     = 0    // DNS query method (per the draft)
+	QueryFILE    = 1    // text file method (for testing)
+)
+
+const (
 	GetOpt Op = 0
 	SetOpt Op = 1
 )
 
-var lib *C.struct_DKIM_LIB
+// Lib is a dkim library handle
+type Lib struct {
+	lib *C.struct_DKIM_LIB
+	mtx sync.Mutex
+}
 
-func init() {
-	lib = C.dkim_init(nil, nil)
-	if lib == nil {
+// Init inits a new dkim library handle
+func Init() *Lib {
+	lib := new(Lib)
+	lib.lib = C.dkim_init(nil, nil)
+	if lib.lib == nil {
 		panic("could not init libopendkim")
+	}
+	runtime.SetFinalizer(lib, func(l *Lib) {
+		l.Close()
+	})
+	return lib
+}
+
+// Options sets or gets library options
+func (lib *Lib) Options(op Op, opt Option, ptr unsafe.Pointer, size uintptr) {
+	C.dkim_options(lib.lib, C.int(op), C.dkim_opts_t(opt), ptr, C.size_t(size))
+}
+
+// Close closes the dkim lib
+func (lib *Lib) Close() {
+	lib.mtx.Lock()
+	defer lib.mtx.Unlock()
+	if lib.lib != nil {
+		C.dkim_close(lib.lib)
+		lib.lib = nil
 	}
 }
 
-func SetOption(opt Option, data []byte) {
-	C.dkim_options(lib, C.int(SetOpt), C.dkim_opts_t(opt), unsafe.Pointer(&data[0]), C.size_t(len(data)))
-}
-
+// Dkim handle
 type Dkim struct {
 	dkim *C.DKIM
-	stat C.DKIM_STAT
 	mtx  sync.Mutex
 }
 
 // NewSigner creates a new DKIM handle for message signing.
 // If -1 is specified for bytesToSign, the whole message body will be signed.
-func NewSigner(secret, selector, domain string, hdrCanon, bodyCanon Canon, algo Sign, bytesToSign int64) *Dkim {
+func (lib *Lib) NewSigner(secret, selector, domain string, hdrCanon, bodyCanon Canon, algo Sign, bytesToSign int64) (*Dkim, error) {
+	var stat C.DKIM_STAT
+
 	signer := new(Dkim)
 	signer.dkim = C.dkim_sign(
-		lib,
+		lib.lib,
 		nil,
 		nil,
 		(*C.uchar)(unsafe.Pointer(C.CString(secret))),
@@ -145,15 +184,30 @@ func NewSigner(secret, selector, domain string, hdrCanon, bodyCanon Canon, algo 
 		C.dkim_canon_t(bodyCanon),
 		C.dkim_alg_t(algo),
 		C.ssize_t(bytesToSign),
-		&signer.stat,
+		&stat,
 	)
-	if signer.dkim == nil {
-		panic("could not create DKIM handle")
+	if stat != StatusOK {
+		return nil, fmt.Errorf("could not create signing handle (%s)", getErr(stat))
 	}
 	runtime.SetFinalizer(signer, func(s *Dkim) {
 		s.Destroy()
 	})
-	return signer
+	return signer, nil
+}
+
+// NewVerifier creates a new DKIM verifier
+func (lib *Lib) NewVerifier() (*Dkim, error) {
+	var stat C.DKIM_STAT
+
+	vrfy := new(Dkim)
+	vrfy.dkim = C.dkim_verify(lib.lib, nil, nil, &stat)
+	if stat != StatusOK {
+		return nil, fmt.Errorf("could not create verify handle (%s)", getErr(stat))
+	}
+	runtime.SetFinalizer(vrfy, func(s *Dkim) {
+		s.Destroy()
+	})
+	return vrfy, nil
 }
 
 // Header processes a single header line.
@@ -162,7 +216,7 @@ func (d *Dkim) Header(line string) error {
 	data := []byte(line)
 	var stat C.DKIM_STAT
 	stat = C.dkim_header(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	if Status(stat) != StatusOK {
+	if stat != StatusOK {
 		return fmt.Errorf("error processing header (%s)", getErr(stat))
 	}
 	return nil
@@ -172,7 +226,7 @@ func (d *Dkim) Header(line string) error {
 func (d *Dkim) Eoh() error {
 	var stat C.DKIM_STAT
 	stat = C.dkim_eoh(d.dkim)
-	if Status(stat) != StatusOK {
+	if stat != StatusOK {
 		return fmt.Errorf("error closing header (%s)", getErr(stat))
 	}
 	return nil
@@ -182,7 +236,7 @@ func (d *Dkim) Eoh() error {
 func (d *Dkim) Body(data []byte) error {
 	var stat C.DKIM_STAT
 	stat = C.dkim_body(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	if Status(stat) != StatusOK {
+	if stat != StatusOK {
 		return fmt.Errorf("error processing body (%s)", getErr(stat))
 	}
 	return nil
@@ -192,7 +246,7 @@ func (d *Dkim) Body(data []byte) error {
 func (d *Dkim) Eom(testKey *bool) error {
 	var stat C.DKIM_STAT
 	stat = C.dkim_eom(d.dkim, (*C._Bool)(testKey))
-	if Status(stat) != StatusOK {
+	if stat != StatusOK {
 		return fmt.Errorf("error closing message (%s)", getErr(stat))
 	}
 	return nil
@@ -206,7 +260,7 @@ func (d *Dkim) Eom(testKey *bool) error {
 // func (d *Dkim) Chunk(data []byte) error {
 // 	var stat C.DKIM_STAT
 // 	stat = C.dkim_chunk(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-// 	if Status(stat) != StatusOK {
+// 	if stat != StatusOK {
 // 		return fmt.Errorf("error processing chunk (%s)", getErr(stat))
 // 	}
 // 	return nil
@@ -217,7 +271,7 @@ func (d *Dkim) GetSigHdr() (string, error) {
 	var stat C.DKIM_STAT
 	var buf = make([]byte, 1024)
 	stat = C.dkim_getsighdr(d.dkim, (*C.u_char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), C.size_t(0))
-	if Status(stat) != StatusOK {
+	if stat != StatusOK {
 		return "", fmt.Errorf("error computing signature header (%s)", getErr(stat))
 	}
 	i := bytes.Index(buf, []byte{0x0})
@@ -225,6 +279,20 @@ func (d *Dkim) GetSigHdr() (string, error) {
 		return string(buf[:i]), nil
 	}
 	return string(buf), nil
+}
+
+// GetSignature returns the signature.
+// Eom must be called before invoking GetSignature.
+func (d *Dkim) GetSignature() (*Signature, error) {
+	var sig *C.DKIM_SIGINFO
+	sig = C.dkim_getsignature(d.dkim)
+	if sig == nil {
+		return nil, errors.New("could not get signature (did you call Eom?)")
+	}
+	return &Signature{
+		h:   d,
+		sig: sig,
+	}, nil
 }
 
 // GetError gets the last error for the dkim handle
@@ -239,12 +307,35 @@ func (d *Dkim) Destroy() error {
 	if d.dkim != nil {
 		var stat C.DKIM_STAT
 		stat = C.dkim_free(d.dkim)
-		if Status(stat) != StatusOK {
+		if stat != StatusOK {
 			return fmt.Errorf("could not destroy DKIM handle (%s)", getErr(stat))
 		}
 		d.dkim = nil
 	}
 	return nil
+}
+
+// Signature is a DKIM signature
+type Signature struct {
+	h   *Dkim
+	sig *C.DKIM_SIGINFO
+}
+
+// Process processes a signature for validity.
+func (s *Signature) Process() error {
+	var stat C.DKIM_STAT
+	stat = C.dkim_sig_process(s.h.dkim, s.sig)
+	if stat != StatusOK {
+		return fmt.Errorf("could not process signature (%s)", getErr(stat))
+	}
+	return nil
+}
+
+// Flags returns the signature flags
+func (s *Signature) Flags() Sigflag {
+	var res C.uint
+	res = C.dkim_sig_getflags(s.sig)
+	return Sigflag(res)
 }
 
 func getErr(s C.DKIM_STAT) string {
