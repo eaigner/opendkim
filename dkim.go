@@ -19,7 +19,6 @@ import "C"
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/mail"
@@ -150,6 +149,9 @@ func Init() *Lib {
 
 // Options sets or gets library options
 func (lib *Lib) Options(op Op, opt Option, ptr unsafe.Pointer, size uintptr) {
+	lib.mtx.Lock()
+	defer lib.mtx.Unlock()
+
 	C.dkim_options(lib.lib, C.int(op), C.dkim_opts_t(opt), ptr, C.size_t(size))
 }
 
@@ -157,6 +159,7 @@ func (lib *Lib) Options(op Op, opt Option, ptr unsafe.Pointer, size uintptr) {
 func (lib *Lib) Close() {
 	lib.mtx.Lock()
 	defer lib.mtx.Unlock()
+
 	if lib.lib != nil {
 		C.dkim_close(lib.lib)
 		lib.lib = nil
@@ -171,7 +174,7 @@ type Dkim struct {
 
 // NewSigner creates a new DKIM handle for message signing.
 // If -1 is specified for bytesToSign, the whole message body will be signed.
-func (lib *Lib) NewSigner(secret, selector, domain string, hdrCanon, bodyCanon Canon, algo Sign, bytesToSign int64) (*Dkim, error) {
+func (lib *Lib) NewSigner(secret, selector, domain string, hdrCanon, bodyCanon Canon, algo Sign, bytesToSign int64) (*Dkim, Status) {
 	var stat C.DKIM_STAT
 
 	signer := new(Dkim)
@@ -188,116 +191,115 @@ func (lib *Lib) NewSigner(secret, selector, domain string, hdrCanon, bodyCanon C
 		C.ssize_t(bytesToSign),
 		&stat,
 	)
-	if stat != StatusOK {
-		return nil, fmt.Errorf("could not create signing handle (%s)", getErr(stat))
+
+	s := Status(stat)
+	if s != StatusOK {
+		return nil, s
 	}
 	runtime.SetFinalizer(signer, func(s *Dkim) {
 		s.Destroy()
 	})
-	return signer, nil
+	return signer, s
 }
 
 // NewVerifier creates a new DKIM verifier
-func (lib *Lib) NewVerifier() (*Dkim, error) {
+func (lib *Lib) NewVerifier() (*Dkim, Status) {
 	var stat C.DKIM_STAT
 
 	vrfy := new(Dkim)
 	vrfy.dkim = C.dkim_verify(lib.lib, nil, nil, &stat)
-	if stat != StatusOK {
-		return nil, fmt.Errorf("could not create verify handle (%s)", getErr(stat))
+
+	s := Status(stat)
+	if s != StatusOK {
+		return nil, s
 	}
 	runtime.SetFinalizer(vrfy, func(s *Dkim) {
 		s.Destroy()
 	})
-	return vrfy, nil
+	return vrfy, s
 }
 
 // Sign is a helper method for signing a block of message data.
 // The message data includes header and body.
-func (d *Dkim) Sign(buf []byte) ([]byte, error) {
-	msg, err := mail.ReadMessage(bytes.NewBuffer(buf))
-	if err != nil {
-		return buf, err
+func (d *Dkim) Sign(r io.Reader) ([]byte, error) {
+	hdr, body, stat := d.process(r)
+	if stat != StatusOK {
+		return nil, stat
 	}
+
+	sigHdr, stat := d.GetSigHdr()
+	if stat != StatusOK {
+		return nil, stat
+	}
+
+	hdr.WriteString(`DKIM-Signature: ` + sigHdr + "\r\n\r\n")
+
 	var out bytes.Buffer
-	for k, vv := range msg.Header {
-		for _, v := range vv {
-			hdr := k + `: ` + v
-			err := d.Header(hdr)
-			if err != nil {
-				return buf, err
-			}
-			out.WriteString(hdr + "\r\n")
-		}
-	}
-
-	err = d.Eoh()
-	if err != nil {
-		return buf, err
-	}
-
-	var body bytes.Buffer
-	io.Copy(&body, msg.Body)
-
-	err = d.Body(body.Bytes())
-	if err != nil {
-		return buf, err
-	}
-	err = d.Eom(nil)
-	if err != nil {
-		return buf, err
-	}
-	sigHdr, err := d.GetSigHdr()
-	if err != nil {
-		return buf, err
-	}
-
-	out.WriteString(`DKIM-Signature: ` + sigHdr + "\r\n\r\n")
-	io.Copy(&out, &body)
+	io.Copy(&out, hdr)
+	io.Copy(&out, body)
 
 	return out.Bytes(), nil
 }
 
+// Verify is a helper method for verifying a message in one step
+func (d *Dkim) Verify(r io.Reader) Status {
+	_, _, stat := d.process(r)
+	return stat
+}
+
+func (d *Dkim) process(r io.Reader) (hdr, body *bytes.Buffer, stat Status) {
+	msg, err := mail.ReadMessage(r)
+	if err != nil {
+		return nil, nil, Status(StatusINTERNAL)
+	}
+	hdr = bytes.NewBuffer(nil)
+	for k, vv := range msg.Header {
+		for _, v := range vv {
+			h := k + `: ` + v
+			stat = d.Header(h)
+			if stat != StatusOK {
+				return
+			}
+			hdr.WriteString(h + "\r\n")
+		}
+	}
+
+	stat = d.Eoh()
+	if stat != StatusOK {
+		return
+	}
+
+	body = bytes.NewBuffer(nil)
+	io.Copy(body, msg.Body)
+
+	stat = d.Body(body.Bytes())
+	if stat != StatusOK {
+		return
+	}
+	stat = d.Eom(nil)
+	return
+}
+
 // Header processes a single header line.
 // May be invoked multiple times.
-func (d *Dkim) Header(line string) error {
+func (d *Dkim) Header(line string) Status {
 	data := []byte(line)
-	var stat C.DKIM_STAT
-	stat = C.dkim_header(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	if stat != StatusOK {
-		return fmt.Errorf("error processing header (%s)", getErr(stat))
-	}
-	return nil
+	return Status(C.dkim_header(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data))))
 }
 
 // Eoh is called to signal end of header.
-func (d *Dkim) Eoh() error {
-	var stat C.DKIM_STAT
-	stat = C.dkim_eoh(d.dkim)
-	if stat != StatusOK {
-		return fmt.Errorf("error closing header (%s)", getErr(stat))
-	}
-	return nil
+func (d *Dkim) Eoh() Status {
+	return Status(C.dkim_eoh(d.dkim))
 }
 
 // Body processes the message body.
-func (d *Dkim) Body(data []byte) error {
-	var stat C.DKIM_STAT
-	stat = C.dkim_body(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	if stat != StatusOK {
-		return fmt.Errorf("error processing body (%s)", getErr(stat))
-	}
-	return nil
+func (d *Dkim) Body(data []byte) Status {
+	return Status(C.dkim_body(d.dkim, (*C.u_char)(unsafe.Pointer(&data[0])), C.size_t(len(data))))
 }
 
 // Eom is called to signal end of message.
-func (d *Dkim) Eom(testKey *bool) error {
-	var stat C.DKIM_STAT
-	stat = C.dkim_eom(d.dkim, (*C._Bool)(testKey))
-	if stat != StatusOK {
-		return fmt.Errorf("error closing message (%s)", getErr(stat))
-	}
-	return nil
+func (d *Dkim) Eom(testKey *bool) Status {
+	return Status(C.dkim_eom(d.dkim, (*C._Bool)(testKey)))
 }
 
 // Chunk processes a chunk of message data.
@@ -315,32 +317,31 @@ func (d *Dkim) Eom(testKey *bool) error {
 // }
 
 // GetSigHdr computes the signature header for a message.
-func (d *Dkim) GetSigHdr() (string, error) {
-	var stat C.DKIM_STAT
+func (d *Dkim) GetSigHdr() (string, Status) {
 	var buf = make([]byte, 1024)
-	stat = C.dkim_getsighdr(d.dkim, (*C.u_char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), C.size_t(0))
+	stat := Status(C.dkim_getsighdr(d.dkim, (*C.u_char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), C.size_t(0)))
 	if stat != StatusOK {
-		return "", fmt.Errorf("error computing signature header (%s)", getErr(stat))
+		return "", stat
 	}
 	i := bytes.Index(buf, []byte{0x0})
 	if i >= 0 {
-		return string(buf[:i]), nil
+		return string(buf[:i]), stat
 	}
-	return string(buf), nil
+	return string(buf), stat
 }
 
 // GetSignature returns the signature.
 // Eom must be called before invoking GetSignature.
-func (d *Dkim) GetSignature() (*Signature, error) {
+func (d *Dkim) GetSignature() *Signature {
 	var sig *C.DKIM_SIGINFO
 	sig = C.dkim_getsignature(d.dkim)
 	if sig == nil {
-		return nil, errors.New("could not get signature (did you call Eom?)")
+		return nil
 	}
 	return &Signature{
 		h:   d,
 		sig: sig,
-	}, nil
+	}
 }
 
 // GetError gets the last error for the dkim handle
@@ -348,19 +349,19 @@ func (d *Dkim) GetError() string {
 	return C.GoString(C.dkim_geterror(d.dkim))
 }
 
-// Destroy destroys the dkim handle
-func (d *Dkim) Destroy() error {
+// Destroy destroys the dkim handle.
+func (d *Dkim) Destroy() Status {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
+
 	if d.dkim != nil {
-		var stat C.DKIM_STAT
-		stat = C.dkim_free(d.dkim)
+		stat := Status(C.dkim_free(d.dkim))
 		if stat != StatusOK {
-			return fmt.Errorf("could not destroy DKIM handle (%s)", getErr(stat))
+			return stat
 		}
 		d.dkim = nil
 	}
-	return nil
+	return Status(StatusOK)
 }
 
 // Signature is a DKIM signature
@@ -370,13 +371,8 @@ type Signature struct {
 }
 
 // Process processes a signature for validity.
-func (s *Signature) Process() error {
-	var stat C.DKIM_STAT
-	stat = C.dkim_sig_process(s.h.dkim, s.sig)
-	if stat != StatusOK {
-		return fmt.Errorf("could not process signature (%s)", getErr(stat))
-	}
-	return nil
+func (s *Signature) Process() Status {
+	return Status(C.dkim_sig_process(s.h.dkim, s.sig))
 }
 
 // Flags returns the signature flags
@@ -387,13 +383,15 @@ func (s *Signature) Flags() Sigflag {
 }
 
 func getErr(s C.DKIM_STAT) string {
-	return (&dkimError{s}).Error()
+	return Status(s).Error()
 }
 
-type dkimError struct {
-	stat C.DKIM_STAT
+type Status int
+
+func (s Status) String() string {
+	return fmt.Sprintf("%d: %s", s, C.GoString(C.dkim_getresultstr(C.DKIM_STAT(s))))
 }
 
-func (err *dkimError) Error() string {
-	return fmt.Sprintf("%d: %s", err.stat, C.GoString(C.dkim_getresultstr(err.stat)))
+func (s Status) Error() string {
+	return s.String()
 }

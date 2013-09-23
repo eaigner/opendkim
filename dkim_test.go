@@ -60,24 +60,24 @@ nSZOSkTBu27e+ZRMa+5VEZchWazUlixTxvPl6T7dK1kVPZ5vRioFSA==
 
 func process(hdr map[string]string, body string, d *Dkim, t *testing.T) {
 	for h, line := range hdr {
-		err := d.Header(h + `: ` + line)
-		if err != nil {
-			t.Fatal(err)
+		stat := d.Header(h + `: ` + line)
+		if stat != StatusOK {
+			t.Fatal(stat)
 		}
 	}
-	err := d.Eoh()
-	if err != nil {
-		t.Fatal(err)
+	stat := d.Eoh()
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
-	err = d.Body([]byte(body))
-	if err != nil {
-		t.Fatal(err)
+	stat = d.Body([]byte(body))
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 	var testKey bool
-	err = d.Eom(&testKey)
-	if err != nil {
+	stat = d.Eom(&testKey)
+	if stat != StatusOK {
 		t.Log(d.GetError())
-		t.Fatal(err)
+		t.Fatal(stat)
 	}
 }
 
@@ -96,7 +96,7 @@ func TestSignAndVerify(t *testing.T) {
 	lib := Init()
 	defer lib.Close()
 
-	d, err := lib.NewSigner(
+	d, stat := lib.NewSigner(
 		testKey,
 		selector,
 		domain,
@@ -105,8 +105,8 @@ func TestSignAndVerify(t *testing.T) {
 		SignRSASHA1,
 		-1,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 	if d == nil {
 		t.Fatal()
@@ -114,9 +114,9 @@ func TestSignAndVerify(t *testing.T) {
 
 	process(msgHdr, msgBody, d, t)
 
-	h, err := d.GetSigHdr()
-	if err != nil {
-		t.Fatal(err)
+	h, stat := d.GetSigHdr()
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 	if !strings.HasPrefix(h, "v=1") {
 		t.Fatal(h)
@@ -134,9 +134,9 @@ func TestSignAndVerify(t *testing.T) {
 
 	t.Log(string(createMsg(hdr, msgBody)))
 
-	d2, err := lib.NewVerifier()
-	if err != nil {
-		t.Fatal(err)
+	d2, stat := lib.NewVerifier()
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 	if d2 == nil {
 		t.Fatal()
@@ -144,13 +144,13 @@ func TestSignAndVerify(t *testing.T) {
 
 	process(hdr, msgBody, d2, t)
 
-	sig, err := d2.GetSignature()
-	if err != nil {
-		t.Fatal(err)
+	sig := d2.GetSignature()
+	if sig == nil {
+		t.Fatal()
 	}
-	err = sig.Process()
-	if err != nil {
-		t.Fatal(err)
+	stat = sig.Process()
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 	flags := sig.Flags()
 
@@ -172,11 +172,28 @@ func TestSignAndVerify(t *testing.T) {
 	}
 }
 
-func TestSignHelper(t *testing.T) {
+func TestSignAndVerifyHelper(t *testing.T) {
 	lib := Init()
 	defer lib.Close()
 
-	d, err := lib.NewSigner(
+	msg := createMsg(msgHdr, msgBody)
+
+	// Verify without signature
+	vrfy, stat := lib.NewVerifier()
+	if stat != StatusOK {
+		t.Fatal(stat)
+	}
+	if vrfy == nil {
+		t.Fatal()
+	}
+
+	stat = vrfy.Verify(bytes.NewBuffer(msg))
+	if stat != StatusNOSIG {
+		t.Fatal(stat)
+	}
+
+	// Sign
+	d, stat := lib.NewSigner(
 		testKey,
 		selector,
 		domain,
@@ -185,21 +202,29 @@ func TestSignHelper(t *testing.T) {
 		SignRSASHA1,
 		-1,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 	if d == nil {
 		t.Fatal()
 	}
 
-	msg := createMsg(msgHdr, msgBody)
-
-	out, err := d.Sign(msg)
+	out, err := d.Sign(bytes.NewBuffer(msg))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if bytes.Index(out, []byte(`DKIM-Signature: v=1`)) < 0 {
 		t.Fatal("signature header not found")
+	}
+
+	// Verify again
+	vrfy, stat = lib.NewVerifier()
+	if stat != StatusOK {
+		t.Fatal(stat)
+	}
+	stat = vrfy.Verify(bytes.NewBuffer(out))
+	if stat != StatusOK {
+		t.Fatal(stat)
 	}
 }
