@@ -3,7 +3,7 @@
 package opendkim
 
 /*
-#cgo LDFLAGS: -L/opt/local/lib -L/usr/lib -lopendkim
+#cgo LDFLAGS: -L/usr/local/opt/opendkim/lib -lopendkim
 #cgo CFLAGS: -g -O2 -Wno-error -I/opt/local/include/opendkim/ -I/usr/include/opendkim/
 
 #include <stdio.h>
@@ -13,7 +13,7 @@ package opendkim
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <dkim.h>
+#include <opendkim/dkim.h>
 */
 import "C"
 
